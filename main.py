@@ -1,54 +1,35 @@
-from collections import defaultdict, deque
-from contextvars import ContextVar
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from uuid import uuid4
 import time
+from collections import defaultdict, deque
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.cors import CORSMiddleware
-
-# -----------------------------
-# Configuration
-# -----------------------------
-
-# Replace with your logged-in email address
-EMAIL = "24f2006126@ds.study.iitm.ac.in"
+EMAIL = "your-email@example.com"
 
 ALLOWED_ORIGIN = "https://app-9y5os1.example.com"
 
-# Also add the exam page origin used by the grader.
-# Replace with the actual exam origin if different.
-EXTRA_ALLOWED_ORIGIN = "https://exam.example.com"
-
 RATE_LIMIT = 8
-WINDOW_SECONDS = 10
+WINDOW = 10  # seconds
+
 
 # -----------------------------
-# Request Context
+# Request Context Middleware
 # -----------------------------
-
-request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
-
-
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid4())
-
         request.state.request_id = request_id
-        request_id_ctx.set(request_id)
 
         response = await call_next(request)
-
         response.headers["X-Request-ID"] = request_id
         return response
 
 
 # -----------------------------
-# Rate Limiter
+# Rate Limiter Middleware
 # -----------------------------
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimiterMiddleware(BaseHTTPMiddleware):
     def __init__(self, app):
         super().__init__(app)
         self.clients = defaultdict(deque)
@@ -57,46 +38,45 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_id = request.headers.get("X-Client-Id", "anonymous")
 
         now = time.time()
-        bucket = self.clients[client_id]
+        q = self.clients[client_id]
 
-        while bucket and now - bucket[0] >= WINDOW_SECONDS:
-            bucket.popleft()
+        while q and now - q[0] > WINDOW:
+            q.popleft()
 
-        if len(bucket) >= RATE_LIMIT:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded"},
-            )
+        if len(q) >= RATE_LIMIT:
+            return {"detail": "Rate limit exceeded"}
 
-        bucket.append(now)
+        q.append(now)
 
         return await call_next(request)
 
 
 # -----------------------------
-# FastAPI App
+# App
 # -----------------------------
-
 app = FastAPI()
 
-# Middleware order:
-# Request Context -> CORS -> Rate Limiter (composition requirement)
+
+# IMPORTANT: Request ID FIRST
 app.add_middleware(RequestContextMiddleware)
 
+
+# CORS (must NOT use "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        ALLOWED_ORIGIN,
-        EXTRA_ALLOWED_ORIGIN,
-    ],
-    allow_credentials=True,
+    allow_origins=[ALLOWED_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.add_middleware(RateLimitMiddleware)
+
+# Rate limiter last
+app.add_middleware(RateLimiterMiddleware)
 
 
+# -----------------------------
+# Endpoint
+# -----------------------------
 @app.get("/ping")
 async def ping(request: Request):
     return {
